@@ -1,0 +1,6 @@
+{
+  "name": "随州市气象局气象证明在线申请系统",
+  "description": "随州市气象局气象灾害证明线上申请与办理进度查询移动端政务便民服务系统",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
