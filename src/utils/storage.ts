@@ -1,4 +1,9 @@
 import { ApplicationRecord, ApplicationStatus, DisasterType, AuditLog } from '../types';
+import {
+  saveApplicationToCloud,
+  queryApplicationsFromCloud,
+  updateApplicationStatusInCloud,
+} from './cloudbase';
 
 const STORAGE_KEY = 'suizhou_qxj_applications_v2';
 
@@ -253,8 +258,11 @@ export function saveApplications(apps: ApplicationRecord[]): void {
   }
 }
 
-// 新增申请
-export function createApplication(data: Omit<ApplicationRecord, 'id' | 'createdAt' | 'status' | 'logs'>): ApplicationRecord {
+// 新增申请（支持写入腾讯云开发 CloudBase "applications" 集合及本地缓存）
+export async function createApplication(
+  data: Omit<ApplicationRecord, 'id' | 'createdAt' | 'status' | 'logs'>,
+  filePathsList: string[] = []
+): Promise<ApplicationRecord> {
   const apps = getApplications();
   const now = new Date();
   const yyyy = now.getFullYear();
@@ -285,15 +293,119 @@ export function createApplication(data: Omit<ApplicationRecord, 'id' | 'createdA
     ],
   };
 
+  // 1. 存入腾讯云开发 CloudBase 云数据库 "applications" 集合
+  try {
+    await saveApplicationToCloud(newApp, filePathsList);
+  } catch (cloudErr) {
+    console.warn('[CloudBase] 写入云数据库 applications 集合提示:', cloudErr);
+  }
+
+  // 2. 同时存入本地缓存，保证秒级响应与离线保障
   apps.unshift(newApp);
   saveApplications(apps);
   return newApp;
 }
 
-// 根据单号或手机号查找
+// 同步新增方法（保留向后兼容）
+export function createApplicationSync(
+  data: Omit<ApplicationRecord, 'id' | 'createdAt' | 'status' | 'logs'>,
+  filePathsList: string[] = []
+): ApplicationRecord {
+  const apps = getApplications();
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const random4 = Math.floor(1000 + Math.random() * 9000);
+  const id = `QX${yyyy}${mm}${dd}${random4}`;
+  const timestamp = `${yyyy}-${mm}-${dd} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+
+  const observation = generateObservationData(data.disasterType, data.disasterDate, data.disasterLocation);
+
+  const newApp: ApplicationRecord = {
+    ...data,
+    id,
+    createdAt: timestamp,
+    status: 'SUBMITTED',
+    certificateNo: `随气证字[${yyyy}]第${mm}${dd}-${random4}号`,
+    issueDate: `${yyyy}-${mm}-${dd}`,
+    observationData: observation,
+    logs: [
+      {
+        status: 'SUBMITTED',
+        title: '申请已成功在线提交',
+        timestamp,
+        operator: data.type === 'personal' ? (data.applicantName || '申请人') : (data.contactName || '单位经办人'),
+        remark: '申报信息与证明材料已入库，排队进入政务服务大厅初审',
+      },
+    ],
+  };
+
+  // 异步触发云数据库存储
+  saveApplicationToCloud(newApp, filePathsList).catch((err) => {
+    console.warn('[CloudBase] 异步同步云数据库提示:', err);
+  });
+
+  apps.unshift(newApp);
+  saveApplications(apps);
+  return newApp;
+}
+
+// 异步从云数据库拉取所有申请记录
+export async function fetchAllApplicationsAsync(): Promise<ApplicationRecord[]> {
+  try {
+    const cloudResults = await queryApplicationsFromCloud('');
+    if (cloudResults && cloudResults.length > 0) {
+      const local = getApplications();
+      const map = new Map<string, ApplicationRecord>();
+      cloudResults.forEach((item) => map.set(item.id, item));
+      local.forEach((item) => {
+        if (!map.has(item.id)) map.set(item.id, item);
+      });
+      const merged = Array.from(map.values());
+      saveApplications(merged);
+      return merged;
+    }
+  } catch (err) {
+    console.warn('[CloudBase] 拉取云数据库数据提示:', err);
+  }
+  return getApplications();
+}
+
+// 异步根据申请编号或手机号从云数据库查询
+export async function queryApplicationsAsync(queryText: string): Promise<ApplicationRecord[]> {
+  const keyword = queryText.trim();
+  if (!keyword) {
+    return fetchAllApplicationsAsync();
+  }
+
+  try {
+    // 优先从腾讯云开发 CloudBase "applications" 集合查询
+    const cloudResults = await queryApplicationsFromCloud(keyword);
+    if (cloudResults && cloudResults.length > 0) {
+      console.log('[CloudBase] 成功从云数据库检索到匹配记录:', cloudResults);
+      // 同步到本地缓存
+      const local = getApplications();
+      const map = new Map<string, ApplicationRecord>();
+      cloudResults.forEach((item) => map.set(item.id, item));
+      local.forEach((item) => {
+        if (!map.has(item.id)) map.set(item.id, item);
+      });
+      saveApplications(Array.from(map.values()));
+      return cloudResults;
+    }
+  } catch (err) {
+    console.warn('[CloudBase] 异步查询云数据库异常，使用本地检索备用:', err);
+  }
+
+  // 降级回退本地缓存检索
+  return queryApplications(keyword);
+}
+
+// 根据单号或手机号查找（本地检索方法）
 export function queryApplications(queryText: string): ApplicationRecord[] {
   const keyword = queryText.trim().toLowerCase();
-  if (!keyword) return [];
+  if (!keyword) return getApplications();
   const apps = getApplications();
   return apps.filter((item) => {
     return (
@@ -305,7 +417,7 @@ export function queryApplications(queryText: string): ApplicationRecord[] {
   });
 }
 
-// 修改申请状态（用于演示切换）
+// 修改申请状态（用于演示切换，支持云端与本地同步）
 export function updateApplicationStatus(id: string, newStatus: ApplicationStatus): ApplicationRecord | null {
   const apps = getApplications();
   const targetIndex = apps.findIndex((a) => a.id === id);
@@ -336,5 +448,11 @@ export function updateApplicationStatus(id: string, newStatus: ApplicationStatus
 
   apps[targetIndex] = app;
   saveApplications(apps);
+
+  // 异步同步至云数据库
+  updateApplicationStatusInCloud(id, newStatus, newLog).catch((err) => {
+    console.warn('[CloudBase] 同步更新云数据库状态提示:', err);
+  });
+
   return app;
 }

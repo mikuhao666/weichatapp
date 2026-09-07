@@ -19,6 +19,7 @@ import {
   validatePhone,
   createApplication,
 } from '../utils/storage';
+import { uploadToCloudStorage } from '../utils/cloudbase';
 
 interface UnitFormViewProps {
   onSuccess: (record: ApplicationRecord) => void;
@@ -71,10 +72,12 @@ export const UnitFormView: React.FC<UnitFormViewProps> = ({
     size: string;
     url?: string;
   } | null>(null);
+  const [letterRawFile, setLetterRawFile] = useState<File | null>(null);
   const [agreement, setAgreement] = useState(true);
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [submitTip, setSubmitTip] = useState('正在提交申请并存入腾讯云开发数据库...');
 
   // 文件上传处理
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -99,6 +102,7 @@ export const UnitFormView: React.FC<UnitFormViewProps> = ({
         ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
         : `${(file.size / 1024).toFixed(0)} KB`;
 
+    setLetterRawFile(file);
     setLetterFile({
       name: file.name,
       size: sizeStr,
@@ -117,52 +121,54 @@ export const UnitFormView: React.FC<UnitFormViewProps> = ({
     setPurpose(
       '现代农业示范园连栋智能化玻璃温室大棚遭受瞬时极大风毁损，申请气象权威数据用于人保财险政策性农业险理赔。'
     );
+    setLetterRawFile(null);
     setLetterFile({
       name: '关于申请开具气象灾害实况证明的公函(盖章版).pdf',
       size: '2.4 MB',
+      url: 'https://images.unsplash.com/photo-1544717305-2782549b5136?w=400&auto=format&fit=crop&q=60',
     });
     setErrors({});
   };
 
-  // 提交
-  const handleSubmit = (e: React.FormEvent) => {
+  // 提交至腾讯云开发 CloudBase
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const newErrors: Record<string, string> = {};
 
     if (!unitName.trim()) {
-      newErrors.unitName = '请输入单位全称';
+      newErrors.unitName = '请输入单位全称（必填项）';
     }
 
     const codeCheck = validateCreditCode(creditCode);
     if (!codeCheck.valid) {
-      newErrors.creditCode = codeCheck.message || '统一社会信用代码格式不正确';
+      newErrors.creditCode = codeCheck.message || '统一社会信用代码格式不正确（必填项）';
     }
 
     if (!contactName.trim()) {
-      newErrors.contactName = '请输入单位联系人或经办人姓名';
+      newErrors.contactName = '请输入单位联系人或经办人姓名（必填项）';
     }
 
     const phoneCheck = validatePhone(phone);
     if (!phoneCheck.valid) {
-      newErrors.phone = phoneCheck.message || '联系电话格式不正确';
+      newErrors.phone = phoneCheck.message || '联系电话格式不正确（必填项）';
     }
 
     if (!disasterLocation.trim()) {
-      newErrors.location = '请输入灾害发生具体地点';
+      newErrors.location = '请输入灾害发生具体地点（必填项）';
     }
 
     if (!purpose.trim()) {
-      newErrors.purpose = '请输入证明用途说明';
+      newErrors.purpose = '请输入证明用途说明（必填项）';
     } else if (purpose.length > 200) {
       newErrors.purpose = '用途说明需在200字以内';
     }
 
     if (!letterFile) {
-      newErrors.file = '请上传加盖单位公章的正式申请函件（支持PDF/JPG/PNG）';
+      newErrors.file = '请上传加盖单位公章的正式申请函件（支持PDF/JPG/PNG，必传项）';
     }
 
     if (!agreement) {
-      newErrors.agreement = '请阅读并确认单位诚信申报承诺';
+      newErrors.agreement = '请阅读并确认单位诚信申报承诺（必勾选）';
     }
 
     if (Object.keys(newErrors).length > 0) {
@@ -173,9 +179,54 @@ export const UnitFormView: React.FC<UnitFormViewProps> = ({
 
     setSubmitting(true);
     setErrors({});
+    setSubmitTip('正在将单位公函证明材料上传至腾讯云开发存储...');
 
-    setTimeout(() => {
-      const created = createApplication({
+    const uploadedCloudPaths: string[] = [];
+    let letterCloudUrl = letterFile?.url;
+
+    try {
+      if (letterRawFile) {
+        const res = await uploadToCloudStorage(
+          letterRawFile,
+          letterRawFile.name || 'unit_letter.pdf',
+          'applications/unit_letters'
+        );
+        if (res.fileID) {
+          uploadedCloudPaths.push(res.fileID);
+          if (res.downloadUrl) letterCloudUrl = res.downloadUrl;
+        }
+      }
+
+      setSubmitTip('材料上传完成，正在向腾讯云数据库 "applications" 集合写入申请记录...');
+
+      const created = await createApplication(
+        {
+          type: 'unit',
+          unitName: unitName.trim(),
+          creditCode: creditCode.trim().toUpperCase(),
+          contactName: contactName.trim(),
+          phone: phone.trim(),
+          disasterType,
+          disasterDate,
+          disasterLocation: disasterLocation.trim(),
+          purpose: purpose.trim(),
+          unitLetterFile: letterFile
+            ? {
+                name: letterFile.name,
+                size: letterFile.size,
+                url: letterCloudUrl || letterFile.url,
+              }
+            : undefined,
+        },
+        uploadedCloudPaths
+      );
+
+      setSubmitting(false);
+      onSuccess(created);
+    } catch (err) {
+      console.error('单位申请提交异常:', err);
+      // 降级使用基础创建
+      const fallbackCreated = await createApplication({
         type: 'unit',
         unitName: unitName.trim(),
         creditCode: creditCode.trim().toUpperCase(),
@@ -187,10 +238,9 @@ export const UnitFormView: React.FC<UnitFormViewProps> = ({
         purpose: purpose.trim(),
         unitLetterFile: letterFile || undefined,
       });
-
       setSubmitting(false);
-      onSuccess(created);
-    }, 600);
+      onSuccess(fallbackCreated);
+    }
   };
 
   return (
@@ -583,13 +633,13 @@ export const UnitFormView: React.FC<UnitFormViewProps> = ({
           >
             {submitting ? (
               <>
-                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                <span>正在提交申请...</span>
+                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0"></span>
+                <span className="truncate text-xs">{submitTip}</span>
               </>
             ) : (
               <>
                 <FileCheck className="w-4 h-4" />
-                <span>提交申请</span>
+                <span>确认并提交申请</span>
               </>
             )}
           </button>

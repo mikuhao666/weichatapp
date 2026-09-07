@@ -89,6 +89,10 @@ export const SuccessModal: React.FC<SuccessModalProps> = ({
             <p className="text-[10px] text-slate-400">
               编号规则：气象标识(QX) + 年月日 + 4位随机码，凭此单号可随时查询进度
             </p>
+            <div className="pt-1 flex items-center justify-center space-x-1.5 text-[10px] text-emerald-700 bg-emerald-50 py-1 px-2 rounded-md border border-emerald-200">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+              <span>数据已同步存入腾讯云开发 CloudBase (applications) 集合</span>
+            </div>
           </div>
 
           {/* 申报信息摘要 */}

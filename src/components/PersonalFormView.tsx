@@ -23,6 +23,7 @@ import {
   validatePhone,
   createApplication,
 } from '../utils/storage';
+import { uploadToCloudStorage, dataURLtoBlob } from '../utils/cloudbase';
 
 interface PersonalFormViewProps {
   onSuccess: (record: ApplicationRecord) => void;
@@ -72,6 +73,8 @@ export const PersonalFormView: React.FC<PersonalFormViewProps> = ({
   const [purpose, setPurpose] = useState('');
   const [idCardFrontImage, setIdCardFrontImage] = useState<string>('');
   const [idCardBackImage, setIdCardBackImage] = useState<string>('');
+  const [frontRawFile, setFrontRawFile] = useState<File | null>(null);
+  const [backRawFile, setBackRawFile] = useState<File | null>(null);
   const [agreement, setAgreement] = useState(true);
 
   // 缩略图大图弹窗预览
@@ -83,6 +86,7 @@ export const PersonalFormView: React.FC<PersonalFormViewProps> = ({
   // 错误提示状态
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [submitTip, setSubmitTip] = useState('正在提交申请并存入腾讯云开发数据库...');
 
   // 身份证输入与实时格式校验
   const handleIdCardChange = (val: string) => {
@@ -151,6 +155,12 @@ export const PersonalFormView: React.FC<PersonalFormViewProps> = ({
       return;
     }
 
+    if (side === 'front') {
+      setFrontRawFile(file);
+    } else {
+      setBackRawFile(file);
+    }
+
     const reader = new FileReader();
     reader.onload = () => {
       const result = reader.result as string;
@@ -182,48 +192,50 @@ export const PersonalFormView: React.FC<PersonalFormViewProps> = ({
     setIdCardBackImage(
       'https://images.unsplash.com/photo-1544717305-2782549b5136?w=400&auto=format&fit=crop&q=60'
     );
+    setFrontRawFile(null);
+    setBackRawFile(null);
     setErrors({});
   };
 
-  // 表单校验与提交
-  const handleSubmit = (e: React.FormEvent) => {
+  // 表单校验与提交至腾讯云开发 CloudBase
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const newErrors: Record<string, string> = {};
 
     if (!applicantName.trim()) {
-      newErrors.name = '请输入申请人真实姓名';
+      newErrors.name = '请输入申请人真实姓名（必填项）';
     }
 
     const idCheck = validateIdCard(idCardNumber);
     if (!idCheck.valid) {
-      newErrors.idCard = idCheck.message || '身份证号无效';
+      newErrors.idCard = idCheck.message || '身份证号无效（必填项）';
     }
 
     const phoneCheck = validatePhone(phone);
     if (!phoneCheck.valid) {
-      newErrors.phone = phoneCheck.message || '手机号无效';
+      newErrors.phone = phoneCheck.message || '手机号无效（必填项）';
     }
 
     if (!disasterLocation.trim()) {
-      newErrors.location = '请输入灾害发生具体地点';
+      newErrors.location = '请输入灾害发生具体地点（必填项）';
     }
 
     if (!purpose.trim()) {
-      newErrors.purpose = '请输入证明用途说明';
+      newErrors.purpose = '请输入证明用途说明（必填项）';
     } else if (purpose.length > 200) {
       newErrors.purpose = '用途说明需在200字以内';
     }
 
     if (!idCardFrontImage) {
-      newErrors.front = '请上传身份证人像面照片';
+      newErrors.front = '请上传身份证人像面照片（必填项）';
     }
 
     if (!idCardBackImage) {
-      newErrors.back = '请上传身份证国徽面照片';
+      newErrors.back = '请上传身份证国徽面照片（必填项）';
     }
 
     if (!agreement) {
-      newErrors.agreement = '请阅读并勾选承诺声明';
+      newErrors.agreement = '请阅读并勾选承诺声明（必勾选）';
     }
 
     if (Object.keys(newErrors).length > 0) {
@@ -235,9 +247,70 @@ export const PersonalFormView: React.FC<PersonalFormViewProps> = ({
 
     setSubmitting(true);
     setErrors({});
+    setSubmitTip('正在将申报材料上传至腾讯云开发存储...');
 
-    setTimeout(() => {
-      const created = createApplication({
+    const uploadedCloudPaths: string[] = [];
+    let frontCloudUrl = idCardFrontImage;
+    let backCloudUrl = idCardBackImage;
+
+    try {
+      // 1. 上传身份证正面至云存储
+      if (frontRawFile) {
+        const res = await uploadToCloudStorage(frontRawFile, frontRawFile.name || 'idcard_front.jpg');
+        if (res.fileID) {
+          uploadedCloudPaths.push(res.fileID);
+          if (res.downloadUrl) frontCloudUrl = res.downloadUrl;
+        }
+      } else if (idCardFrontImage.startsWith('data:')) {
+        const blob = dataURLtoBlob(idCardFrontImage);
+        const res = await uploadToCloudStorage(blob, 'idcard_front.jpg');
+        if (res.fileID) {
+          uploadedCloudPaths.push(res.fileID);
+          if (res.downloadUrl) frontCloudUrl = res.downloadUrl;
+        }
+      }
+
+      // 2. 上传身份证反面至云存储
+      if (backRawFile) {
+        const res = await uploadToCloudStorage(backRawFile, backRawFile.name || 'idcard_back.jpg');
+        if (res.fileID) {
+          uploadedCloudPaths.push(res.fileID);
+          if (res.downloadUrl) backCloudUrl = res.downloadUrl;
+        }
+      } else if (idCardBackImage.startsWith('data:')) {
+        const blob = dataURLtoBlob(idCardBackImage);
+        const res = await uploadToCloudStorage(blob, 'idcard_back.jpg');
+        if (res.fileID) {
+          uploadedCloudPaths.push(res.fileID);
+          if (res.downloadUrl) backCloudUrl = res.downloadUrl;
+        }
+      }
+
+      setSubmitTip('材料上传完成，正在向腾讯云数据库 "applications" 集合写入申请记录...');
+
+      // 3. 提交至云数据库并生成申请编号
+      const created = await createApplication(
+        {
+          type: 'personal',
+          applicantName: applicantName.trim(),
+          idCardNumber: idCardNumber.trim().toUpperCase(),
+          phone: phone.trim(),
+          disasterType,
+          disasterDate,
+          disasterLocation: disasterLocation.trim(),
+          purpose: purpose.trim(),
+          idCardFrontImage: frontCloudUrl,
+          idCardBackImage: backCloudUrl,
+        },
+        uploadedCloudPaths
+      );
+
+      setSubmitting(false);
+      onSuccess(created);
+    } catch (err) {
+      console.error('个人申请提交异常:', err);
+      // 降级使用基础创建
+      const fallbackCreated = await createApplication({
         type: 'personal',
         applicantName: applicantName.trim(),
         idCardNumber: idCardNumber.trim().toUpperCase(),
@@ -249,10 +322,9 @@ export const PersonalFormView: React.FC<PersonalFormViewProps> = ({
         idCardFrontImage,
         idCardBackImage,
       });
-
       setSubmitting(false);
-      onSuccess(created);
-    }, 600);
+      onSuccess(fallbackCreated);
+    }
   };
 
   return (
@@ -789,13 +861,13 @@ export const PersonalFormView: React.FC<PersonalFormViewProps> = ({
           >
             {submitting ? (
               <>
-                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                <span>正在提交申请...</span>
+                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0"></span>
+                <span className="truncate text-xs">{submitTip}</span>
               </>
             ) : (
               <>
                 <Send className="w-4 h-4" />
-                <span>提交申请</span>
+                <span>确认并提交申请</span>
               </>
             )}
           </button>

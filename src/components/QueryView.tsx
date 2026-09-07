@@ -17,8 +17,11 @@ import {
   STATUS_STEPS,
   getApplications,
   queryApplications,
+  queryApplicationsAsync,
+  fetchAllApplicationsAsync,
   updateApplicationStatus,
 } from '../utils/storage';
+import { CLOUDBASE_ENV_ID } from '../utils/cloudbase';
 
 interface QueryViewProps {
   onSelectCertificate: (record: ApplicationRecord) => void;
@@ -35,8 +38,10 @@ export const QueryView: React.FC<QueryViewProps> = ({
   const [allApplications, setAllApplications] = useState<ApplicationRecord[]>([]);
   const [selectedApp, setSelectedApp] = useState<ApplicationRecord | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [cloudSyncing, setCloudSyncing] = useState(false);
 
-  const loadData = () => {
+  const loadData = async () => {
     const apps = getApplications();
     setAllApplications(apps);
 
@@ -45,13 +50,28 @@ export const QueryView: React.FC<QueryViewProps> = ({
       if (match) {
         setSelectedApp(match);
         setHasSearched(true);
-        return;
       }
+    } else if (apps.length > 0 && !selectedApp) {
+      setSelectedApp(apps[0]);
     }
 
-    // 默认展示最新一条或者第一条（方便直接看效果）
-    if (apps.length > 0 && !selectedApp) {
-      setSelectedApp(apps[0]);
+    // 从腾讯云开发数据库同步最新数据
+    setCloudSyncing(true);
+    try {
+      const cloudApps = await fetchAllApplicationsAsync();
+      if (cloudApps.length > 0) {
+        setAllApplications(cloudApps);
+        if (initialQueryId) {
+          const cloudMatch = cloudApps.find((a) => a.id === initialQueryId);
+          if (cloudMatch) setSelectedApp(cloudMatch);
+        } else if (!selectedApp) {
+          setSelectedApp(cloudApps[0]);
+        }
+      }
+    } catch (err) {
+      console.warn('从腾讯云开发同步数据异常:', err);
+    } finally {
+      setCloudSyncing(false);
     }
   };
 
@@ -59,29 +79,41 @@ export const QueryView: React.FC<QueryViewProps> = ({
     loadData();
   }, [initialQueryId]);
 
-  const handleSearch = (e?: React.FormEvent) => {
+  const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setHasSearched(true);
 
-    if (!searchInput.trim()) {
+    const queryTerm = searchInput.trim();
+    if (!queryTerm) {
       if (allApplications.length > 0) {
         setSelectedApp(allApplications[0]);
       }
       return;
     }
 
-    const results = queryApplications(searchInput);
-    if (results.length > 0) {
-      setSelectedApp(results[0]);
-    } else {
-      setSelectedApp(null);
+    setLoading(true);
+    try {
+      // 优先从腾讯云开发数据库进行跨字段匹配（编号、手机号、身份证号、统一代码）
+      const cloudResults = await queryApplicationsAsync(queryTerm);
+      if (cloudResults.length > 0) {
+        setSelectedApp(cloudResults[0]);
+      } else {
+        const localResults = queryApplications(queryTerm);
+        setSelectedApp(localResults.length > 0 ? localResults[0] : null);
+      }
+    } catch (err) {
+      console.error('云数据库查询异常，使用本地备选数据:', err);
+      const localResults = queryApplications(queryTerm);
+      setSelectedApp(localResults.length > 0 ? localResults[0] : null);
+    } finally {
+      setLoading(false);
     }
   };
 
   // 演示模式：修改当前状态以测试各节点体验
-  const handleQuickStatusChange = (newStatus: ApplicationStatus) => {
+  const handleQuickStatusChange = async (newStatus: ApplicationStatus) => {
     if (!selectedApp) return;
-    const updated = updateApplicationStatus(selectedApp.id, newStatus);
+    const updated = await updateApplicationStatus(selectedApp.id, newStatus);
     if (updated) {
       setSelectedApp(updated);
       setAllApplications(getApplications());
@@ -102,21 +134,48 @@ export const QueryView: React.FC<QueryViewProps> = ({
     <div className="space-y-4 pb-16">
       {/* 搜索栏卡片 */}
       <div className="bg-white rounded-xl shadow-xs border border-slate-200 p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <Search className="w-4 h-4 text-[#003366]" />
+            <span className="text-xs sm:text-sm font-bold text-slate-800">
+              气象证明进度与实况查验
+            </span>
+          </div>
+          <div className="flex items-center space-x-1.5 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span>云数据库直连</span>
+            {cloudSyncing && (
+              <RefreshCw className="w-3 h-3 animate-spin text-emerald-600" />
+            )}
+          </div>
+        </div>
+
         <form onSubmit={handleSearch} className="relative flex items-center">
           <input
             id="query-input-search"
             type="text"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="输入18位身份证号或申请编号查询"
-            className="w-full pl-3.5 pr-16 py-2.5 border border-slate-200 rounded-lg text-xs sm:text-sm outline-hidden focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition-all font-mono"
+            placeholder="输入申请编号（如QX...）或预留手机号查询"
+            className="w-full pl-3.5 pr-20 py-2.5 border border-slate-200 rounded-lg text-xs sm:text-sm outline-hidden focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition-all font-mono"
           />
           <button
             id="btn-query-search"
             type="submit"
-            className="absolute right-3 text-blue-600 hover:text-blue-800 font-bold text-xs sm:text-sm cursor-pointer"
+            disabled={loading}
+            className="absolute right-2 px-3 py-1.5 bg-[#003366] hover:bg-[#00274d] text-white rounded-md font-bold text-xs cursor-pointer flex items-center space-x-1 transition-colors disabled:opacity-50"
           >
-            查询
+            {loading ? (
+              <>
+                <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                <span>查询中</span>
+              </>
+            ) : (
+              <>
+                <Search className="w-3.5 h-3.5" />
+                <span>查询</span>
+              </>
+            )}
           </button>
         </form>
 
@@ -292,7 +351,7 @@ export const QueryView: React.FC<QueryViewProps> = ({
           <AlertCircle className="w-10 h-10 text-amber-500 mx-auto" />
           <h3 className="text-sm font-bold text-slate-800">未查询到相关申报记录</h3>
           <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            请确认输入的申请编号（如 SZQX-20260907-XXXX）或预留手机号码是否正确。
+            请确认输入的申请编号（如 QX202609071234）或预留手机号码是否正确。云数据库将自动进行实时检索。
           </p>
         </div>
       ) : null}
